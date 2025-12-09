@@ -225,9 +225,9 @@ private:
             // 只有短触才触发
             if (touch_duration < TOUCH_THRESHOLD_MS) {
                 auto& app = Application::GetInstance();
-                if (app.GetDeviceState() == kDeviceStateStarting &&
-                    !WifiStation::GetInstance().IsConnected()) {
-                    board->ResetWifiConfiguration();
+                if (app.GetDeviceState() == kDeviceStateStarting) {
+                    board->EnterWifiConfigMode();
+                    return;
                 }
                 app.ToggleChatState();
             }
@@ -349,8 +349,9 @@ private:
     void InitializeButtons() {
         boot_button_.OnClick([this]() {
             auto& app = Application::GetInstance();
-            if (app.GetDeviceState() == kDeviceStateStarting && !WifiStation::GetInstance().IsConnected()) {
-                ResetWifiConfiguration();
+            if (app.GetDeviceState() == kDeviceStateStarting) {
+                EnterWifiConfigMode();
+                return;
             }
             app.ToggleChatState();
         });
@@ -456,12 +457,12 @@ public:
         return true;
     }
 
-    virtual void SetPowerSaveMode(bool enabled) override {
-        if (!enabled) {
-            power_save_timer_->WakeUp();
-        }
-        WifiBoard::SetPowerSaveMode(enabled);
-    }
+    // virtual void SetPowerSaveLevel(PowerSaveLevel level) override {
+    //     if (level != PowerSaveLevel::LOW_POWER) {
+    //         power_save_timer_->WakeUp();
+    //     }
+    //     WifiBoard::SetPowerSaveLevel(level);
+    // }
 };
 
 DECLARE_BOARD(CustomC3Board);
