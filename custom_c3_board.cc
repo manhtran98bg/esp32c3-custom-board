@@ -42,9 +42,6 @@ public:
         int y = -1;
     };
     Cst816d(i2c_master_bus_handle_t i2c_bus, uint8_t addr) : I2cDevice(i2c_bus, addr) {
-        uint8_t chip_id = ReadReg(0xA3);
-        ESP_LOGI(TAG, "Get chip ID: 0x%02X", chip_id);
-        last_chip_id_ = chip_id;
         read_buffer_ = new uint8_t[6];
     }
 
@@ -90,7 +87,7 @@ public:
         uint8_t id = 0;
         ret = i2c_master_transmit_receive(dev, &reg, 1, &id, 1, 100);
         i2c_master_bus_rm_device(dev);
-        if (ret == ESP_OK) {
+        if (ret == ESP_OK) { 
             chip_id = id;
             return true;
         }
@@ -116,9 +113,8 @@ public:
                     bool mirror_y,
                     bool swap_xy)
         : SpiLcdDisplay(io_handle, panel_handle, width, height, offset_x, offset_y, mirror_x, mirror_y, swap_xy) {
-
         DisplayLockGuard lock(this);
-        // 由于屏幕是圆的，所以状态栏需要增加左右内边距
+        // Because the screen is round, the status bar needs to have increased left and right inner margins.
         lv_obj_set_style_pad_left(status_bar_, LV_HOR_RES * 0.33, 0);
         lv_obj_set_style_pad_right(status_bar_, LV_HOR_RES * 0.33, 0);
     }
@@ -127,15 +123,16 @@ public:
 
 class CustomC3Board : public WifiBoard {
 private:
-    i2c_master_bus_handle_t codec_i2c_bus_ = nullptr;
     i2c_master_bus_handle_t i2c_bus_ = nullptr;
     Button boot_button_;
     Display* display_ = nullptr;
-    esp_timer_handle_t touchpad_timer_ = nullptr;
     Cst816d* cst816d_ = nullptr;
-    PowerSaveTimer* power_save_timer_ = nullptr;
+    Backlight *backlight_ = nullptr;
+    AudioCodec *audio_codec_ = nullptr;
     esp_lcd_panel_handle_t panel_ = nullptr;
-    PowerManager* power_manager_ = nullptr;
+    esp_timer_handle_t touchpad_timer_ = nullptr;
+    PowerSaveTimer* power_save_timer_ = nullptr;
+    
 
     void InitializePowerSaveTimer() {
         power_save_timer_ = new PowerSaveTimer(160, 300);
@@ -149,8 +146,7 @@ private:
     }
 
 
-    void InitializeCodecI2c() {
-        // Initialize I2C peripheral
+    void InitializeI2c() {
         i2c_master_bus_config_t i2c_bus_cfg = {
             .i2c_port = I2C_NUM_0,
             .sda_io_num = AUDIO_CODEC_I2C_SDA_PIN,
@@ -163,43 +159,20 @@ private:
                 .enable_internal_pullup = 1,
             },
         };
-        ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_bus_cfg, &codec_i2c_bus_));
-        if (i2c_master_probe(codec_i2c_bus_, 0x18, 1000) != ESP_OK) {
+        ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_bus_cfg, &i2c_bus_));
+        if (i2c_master_probe(i2c_bus_, ES8311_CODEC_DEFAULT_ADDR >> 1, 1000) != ESP_OK) {
+            ESP_LOGE(TAG, "Failed probe Codec ES8311, check hardware first.");
             while (true) {
-                ESP_LOGE(TAG, "Failed to probe I2C bus for codec, please check if you have installed the correct firmware");
                 vTaskDelay(1000 / portTICK_PERIOD_MS);
             }
-            ESP_LOGI(TAG, "Codec I2C bus initialized, found codec device");
+            
         }
+        ESP_LOGI(TAG, "I2C bus initialized, found codec ES8311 device");
+        audio_codec_ = new Es8311AudioCodec(i2c_bus_, I2C_BUS, AUDIO_INPUT_SAMPLE_RATE, AUDIO_OUTPUT_SAMPLE_RATE,
+            AUDIO_I2S_GPIO_MCLK, AUDIO_I2S_GPIO_BCLK, AUDIO_I2S_GPIO_WS, AUDIO_I2S_GPIO_DOUT, AUDIO_I2S_GPIO_DIN,
+            AUDIO_CODEC_PA_PIN, AUDIO_CODEC_ES8311_ADDR);
     }
 
-    void InitializeCodecI2c_Touch() {
-        // Initialize I2C peripheral
-        // i2c_master_bus_config_t i2c_bus_cfg = {
-        //     .i2c_port = I2C_NUM_1,
-        //     .sda_io_num = TP_PIN_NUM_TP_SDA,
-        //     .scl_io_num = TP_PIN_NUM_TP_SCL,
-        //     .clk_source = I2C_CLK_SRC_DEFAULT,
-        //     .glitch_ignore_cnt = 7,
-        //     .intr_priority = 0,
-        //     .trans_queue_depth = 0,
-        //     .flags = {
-        //         .enable_internal_pullup = 1,
-        //     },
-        // };
-        // esp_err_t ret = i2c_new_master_bus(&i2c_bus_cfg, &i2c_bus_);
-        // if (ret != ESP_OK) {
-        //     ESP_LOGE(TAG, "i2c_new_master_bus failed: %s", esp_err_to_name(ret));
-        //     i2c_bus_ = nullptr;
-        // }
-        if (i2c_master_probe(codec_i2c_bus_, 0x15, 1000) != ESP_OK) {
-            while (true) {
-                ESP_LOGE(TAG, "Failed to probe I2C bus for touch, please check if you have installed the correct firmware");
-                vTaskDelay(1000 / portTICK_PERIOD_MS);
-            }
-            ESP_LOGI(TAG, "touch I2C bus initialized, found touch device");
-        }
-    }
 
 
     static void touchpad_timer_callback(void* arg) {
@@ -207,22 +180,22 @@ private:
         if (!board || !board->cst816d_) return;
         static bool was_touched = false;
         static int64_t touch_start_time = 0;
-        const int64_t TOUCH_THRESHOLD_MS = 500;  // 触摸时长阈值，超过500ms视为长按
+        const int64_t TOUCH_THRESHOLD_MS = 500;  // Touch duration threshold: touch duration exceeding 500ms is considered a long press.
 
         board->cst816d_->UpdateTouchPoint();
         auto touch_point = board->cst816d_->GetTouchPoint();
 
-        // 检测触摸开始
+        // Touch detection begins
         if (touch_point.num > 0 && !was_touched) {
             was_touched = true;
             touch_start_time = esp_timer_get_time() / 1000; // 转换为毫秒
         }
-        // 检测触摸释放
+        // Touch release
         else if (touch_point.num == 0 && was_touched) {
             was_touched = false;
             int64_t touch_duration = (esp_timer_get_time() / 1000) - touch_start_time;
 
-            // 只有短触才触发
+            // short touch
             if (touch_duration < TOUCH_THRESHOLD_MS) {
                 auto& app = Application::GetInstance();
                 if (app.GetDeviceState() == kDeviceStateStarting) {
@@ -235,49 +208,34 @@ private:
     }
 
     void InitializeCst816DTouchPad() {
-        ESP_LOGI(TAG, "Init Cst816D");
-
-        // RST/INT 管脚初始化
-        gpio_config_t io_conf = {};
-        io_conf.intr_type = GPIO_INTR_DISABLE;
-        io_conf.mode = GPIO_MODE_OUTPUT;
-        io_conf.pin_bit_mask = (1ULL << TP_PIN_NUM_TP_RST);
-        io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
-        io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
-        gpio_config(&io_conf);
-
-        gpio_config_t int_conf = {};
-        int_conf.intr_type = GPIO_INTR_DISABLE;
-        int_conf.mode = GPIO_MODE_INPUT;
-        int_conf.pin_bit_mask = (1ULL << TP_PIN_NUM_TP_INT);
-        int_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
-        int_conf.pull_up_en = GPIO_PULLUP_ENABLE;
-        gpio_config(&int_conf);
-
-        // 触摸芯片复位序列
+        // RST io initialize
+        if (TP_PIN_NUM_TP_RST != GPIO_NUM_NC) 
+        {
+            gpio_config_t rst_io_conf = {};
+            rst_io_conf.mode = GPIO_MODE_OUTPUT;
+            rst_io_conf.pin_bit_mask = (1ULL << TP_PIN_NUM_TP_RST);
+            gpio_config(&rst_io_conf);
+        }
         gpio_set_level(TP_PIN_NUM_TP_RST, 0);
         vTaskDelay(pdMS_TO_TICKS(5));
         gpio_set_level(TP_PIN_NUM_TP_RST, 1);
         vTaskDelay(pdMS_TO_TICKS(50));
 
-        // 探测是否存在触摸芯片
+        // Detecting the presence of a touch chip
         uint8_t chip_id = 0;
-        if (!codec_i2c_bus_) {
+        if (!i2c_bus_) {
             ESP_LOGW(TAG, "Touch I2C bus not initialized, skip touch");
             return;
         }
-        bool touch_available = Cst816d::Probe(codec_i2c_bus_, 0x15, chip_id);
+        bool touch_available = Cst816d::Probe(i2c_bus_, TP_CTS816D_ADDR, chip_id);
         if (!touch_available) {
             ESP_LOGW(TAG, "CST816D not found, running in non-touch mode");
-            // 释放触摸I2C，避免无设备时反复报错
-            // i2c_del_master_bus(i2c_bus_);
-            // i2c_bus_ = nullptr;
             return;
         }
 
-        cst816d_ = new Cst816d(codec_i2c_bus_, 0x15);
+        cst816d_ = new Cst816d(i2c_bus_, TP_CTS816D_ADDR);
 
-        // 创建定时器，10ms 间隔
+        // Create a timer with a 10ms interval (Polling mode, no isr)
         esp_timer_create_args_t timer_args = {
             .callback = touchpad_timer_callback,
             .arg = this,
@@ -291,7 +249,7 @@ private:
         }
     }
 
-    // SPI初始化
+    // SPI Initialization
     void InitializeSpi() {
         ESP_LOGI(TAG, "Initialize SPI bus");
         spi_bus_config_t buscfg = GC9A01_PANEL_BUS_SPI_CONFIG(DISPLAY_SPI_SCLK_PIN, DISPLAY_SPI_MOSI_PIN,
@@ -299,7 +257,7 @@ private:
         ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO));
     }
 
-    // GC9A01初始化
+    // GC9A01 initialization
     void InitializeGc9a01Display() {
         ESP_LOGI(TAG, "Init GC9A01 display");
         ESP_LOGI(TAG, "Install panel IO");
@@ -332,9 +290,6 @@ private:
         uint8_t data_0x36[] = { 0x48};
         esp_lcd_panel_io_tx_param(io_handle, 0x36, data_0x36, sizeof(data_0x36));
 
-        // uint8_t data_0x74[] = { 0x10, 0x85, 0x80, 0x00, 0x00, 0x4E, 0x00};
-        // esp_lcd_panel_io_tx_param(io_handle, 0x74, data_0x74, sizeof(data_0x74));
-
         uint8_t data_0xC3[] = { 0x1F};
         esp_lcd_panel_io_tx_param(io_handle, 0xC3, data_0xC3, sizeof(data_0xC3));
 
@@ -343,6 +298,9 @@ private:
 
         display_ = new CustomLcdDisplay(io_handle, panel_handle,
                                     DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
+        // backlight
+        backlight_ = new PwmBacklight(DISPLAY_BACKLIGHT_PIN, DISPLAY_BACKLIGHT_OUTPUT_INVERT);
+        backlight_->RestoreBrightness();
 
     }
 
@@ -359,24 +317,14 @@ private:
 
 public:
     CustomC3Board() : boot_button_(BOOT_BUTTON_GPIO) {
-        // 先初始化触摸的I2C并探测/初始化触摸（若无触摸则跳过）
-        InitializeCodecI2c();
-        InitializeCodecI2c_Touch();
+        // Initialize I2C bus (Codec and Touch on same bus)
+        InitializeI2c();
         InitializeCst816DTouchPad();
-
-        // 初始化音频I2C
-        
-
-        // 显示相关先建立起来
+        // Initialize LCD Display
         InitializeSpi();
         InitializeGc9a01Display();
-        // InitializeButtons();
-        if (GetBacklight()) {
-            GetBacklight()->RestoreBrightness();
-        }
-
-        // 显示和背光可用后再初始化省电逻辑，避免空指针
-        // InitializePowerSaveTimer();
+        InitializeButtons();
+        InitializePowerSaveTimer();
     }
 
     ~CustomC3Board() {
@@ -393,28 +341,26 @@ public:
             delete power_save_timer_;
             power_save_timer_ = nullptr;
         }
-        if (power_manager_) {
-            delete power_manager_;
-            power_manager_ = nullptr;
-        }
         if (display_) {
             delete display_;
             display_ = nullptr;
+        }
+        if (backlight_) {
+            delete backlight_;
+            backlight_ = nullptr;
+        }
+        if (audio_codec_) {
+            delete audio_codec_;
+            audio_codec_ = nullptr;
         }
         if (i2c_bus_) {
             i2c_del_master_bus(i2c_bus_);
             i2c_bus_ = nullptr;
         }
-        if (codec_i2c_bus_) {
-            i2c_del_master_bus(codec_i2c_bus_);
-            codec_i2c_bus_ = nullptr;
-        }
     }
 
 
     virtual Led* GetLed() override {
-        // static SingleLed led(BUILTIN_LED_GPIO);
-        // return &led;
         return nullptr;
     }
 
@@ -423,46 +369,17 @@ public:
     }
 
     virtual Backlight* GetBacklight() override {
-        static PwmBacklight backlight(DISPLAY_BACKLIGHT_PIN, DISPLAY_BACKLIGHT_OUTPUT_INVERT);
-        return &backlight;
+        return backlight_;
     }
 
     virtual AudioCodec* GetAudioCodec() override {
-        static Es8311AudioCodec audio_codec(codec_i2c_bus_, I2C_NUM_0, AUDIO_INPUT_SAMPLE_RATE, AUDIO_OUTPUT_SAMPLE_RATE,
-            AUDIO_I2S_GPIO_MCLK, AUDIO_I2S_GPIO_BCLK, AUDIO_I2S_GPIO_WS, AUDIO_I2S_GPIO_DOUT, AUDIO_I2S_GPIO_DIN,
-            AUDIO_CODEC_PA_PIN, AUDIO_CODEC_ES8311_ADDR);
-        return &audio_codec;
+        return audio_codec_;
     }
 
     Cst816d* GetTouchpad() {
         return cst816d_;
     }
 
-    virtual bool GetBatteryLevel(int& level, bool& charging, bool& discharging) override {
-        if (!power_manager_) {
-            level = 0;
-            charging = false;
-            discharging = true;
-            return false;
-        }
-        
-        static bool last_discharging = false;
-        charging = power_manager_->IsCharging();
-        discharging = power_manager_->IsDischarging();
-        if (discharging != last_discharging) {
-            power_save_timer_->SetEnabled(discharging);
-            last_discharging = discharging;
-        }
-        level = power_manager_->GetBatteryLevel();
-        return true;
-    }
-
-    // virtual void SetPowerSaveLevel(PowerSaveLevel level) override {
-    //     if (level != PowerSaveLevel::LOW_POWER) {
-    //         power_save_timer_->WakeUp();
-    //     }
-    //     WifiBoard::SetPowerSaveLevel(level);
-    // }
 };
 
 DECLARE_BOARD(CustomC3Board);
