@@ -28,14 +28,14 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "power_manager.h"
-
+#include "lcd_gc9a01.h"
 #define TAG "CustomC3Board"
 
-// LV_FONT_DECLARE(font_puhui_16_4);
-// LV_FONT_DECLARE(font_awesome_16_4);
+LV_FONT_DECLARE(font_puhui_16_4);
+LV_FONT_DECLARE(font_awesome_16_4);
 
-LV_FONT_DECLARE(font_puhui_basic_14_1);
-LV_FONT_DECLARE(font_awesome_14_1);
+// LV_FONT_DECLARE(font_puhui_basic_14_1);
+// LV_FONT_DECLARE(font_awesome_14_1);
 
 
 class Cst816d : public I2cDevice {
@@ -266,10 +266,7 @@ private:
     void InitializeGc9a01Display() {
         ESP_LOGI(TAG, "Init GC9A01 display");
         ESP_LOGI(TAG, "Install panel IO");
-        esp_lcd_panel_io_handle_t io_handle = NULL;
-        esp_lcd_panel_io_spi_config_t io_config = GC9A01_PANEL_IO_SPI_CONFIG(DISPLAY_SPI_CS_PIN, DISPLAY_SPI_DC_PIN, 0, NULL);
-        io_config.pclk_hz = DISPLAY_SPI_SCLK_HZ;
-        ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(SPI2_HOST, &io_config, &io_handle));
+        esp_lcd_panel_io_handle_t io_handle = (esp_lcd_panel_io_handle_t)malloc(sizeof(esp_lcd_panel_io_handle_t));
 
         ESP_LOGI(TAG, "Install GC9A01 panel driver");
         esp_lcd_panel_handle_t panel_handle = NULL;
@@ -278,28 +275,11 @@ private:
         panel_config.rgb_endian = LCD_RGB_ENDIAN_BGR;           //LCD_RGB_ENDIAN_RGB;
         panel_config.bits_per_pixel = 16;
 
-        ESP_ERROR_CHECK(esp_lcd_new_panel_gc9a01(io_handle, &panel_config, &panel_handle));
+        ESP_ERROR_CHECK(esp_lcd_new_panel_gc9a01_lgfx(io_handle, &panel_config, &panel_handle));
         panel_ = panel_handle;
         ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle));
         ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
-        ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel_handle, true));
-        ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel_handle, true, false));
-        ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle, true));
 
-        uint8_t data_0x62[] = { 0x18, 0x0D, 0x71, 0xED, 0x70, 0x70, 0x18, 0x0F, 0x71, 0xEF, 0x70, 0x70 };
-        esp_lcd_panel_io_tx_param(io_handle, 0x62, data_0x62, sizeof(data_0x62));
-
-        uint8_t data_0x63[] = { 0x18, 0x11, 0x71, 0xF1, 0x70, 0x70, 0x18, 0x13, 0x71, 0xF3, 0x70, 0x70 };
-        esp_lcd_panel_io_tx_param(io_handle, 0x63, data_0x63, sizeof(data_0x63));
-
-        uint8_t data_0x36[] = { 0x48};
-        esp_lcd_panel_io_tx_param(io_handle, 0x36, data_0x36, sizeof(data_0x36));
-
-        uint8_t data_0xC3[] = { 0x1F};
-        esp_lcd_panel_io_tx_param(io_handle, 0xC3, data_0xC3, sizeof(data_0xC3));
-
-        uint8_t data_0xC4[] = { 0x1F};
-        esp_lcd_panel_io_tx_param(io_handle, 0xC4, data_0xC4, sizeof(data_0xC4));
 
         display_ = new CustomLcdDisplay(io_handle, panel_handle,
                                     DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
@@ -499,5 +479,5 @@ public:
     }
 };
 
-// DECLARE_BOARD(CustomC3Board);
-DECLARE_BOARD(CustomC3OledBoard);
+DECLARE_BOARD(CustomC3Board);
+// DECLARE_BOARD(CustomC3OledBoard);
